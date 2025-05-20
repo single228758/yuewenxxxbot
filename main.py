@@ -35,8 +35,8 @@ from .login import LoginHandler
 
 class YuewenPlugin(PluginBase):
     description = "跃问AI助手插件"
-    author = "xxxbot团伙"
-    version = "0.2"
+    author = "lanvent (adapted for xxxbot)"
+    version = "1.0.2"
 
     def __init__(self):
         """初始化插件"""
@@ -1283,7 +1283,7 @@ class YuewenPlugin(PluginBase):
             return False
 
     # ======== 消息发送与处理 ========
-    async def send_message_async(self, content):
+    async def send_message_async(self, content, attachments=None):
         """发送消息到跃问AI并返回响应（异步版本）"""
         try:
             current_time = time.time()
@@ -1334,9 +1334,9 @@ class YuewenPlugin(PluginBase):
             
             # 根据API版本发送消息
             if self.api_version == 'new':
-                response = await self._send_message_new_async(content)
+                response = await self._send_message_new_async(content, attachments=attachments)
             else:
-                response = await self._send_message_old_async(content)
+                response = await self._send_message_old_async(content, attachments=attachments)
             
             return response
         except Exception as e:
@@ -2720,7 +2720,7 @@ class YuewenPlugin(PluginBase):
                 self.image_directly_sent = False
                 
                 # 发送消息
-                result = await self._send_message_new_async(prompt, attachments)
+                result = await self.send_message_async(prompt, attachments)
                 
                 # 发送结果 - 检查是否图片已经直接发送
                 if result:
@@ -3587,8 +3587,34 @@ class YuewenPlugin(PluginBase):
         # 检查是否有等待处理的识图请求（单图模式）
         if user_id in self.waiting_for_image:
             logger.info(f"[Yuewen] 用户 {user_id} 正在等待图片，处理图片消息")
-            # 下载图片
-            image_data = await self.download_image(bot, message)
+            
+            image_data = None # 初始化 image_data
+
+            # 步骤1: 尝试直接从 message['Content'] 提取Base64数据 (类似Doubao)
+            content_value = message.get('Content')
+            if isinstance(content_value, str) and len(content_value) > 200: # Doubao使用200作为阈值
+                logger.debug(f"[Yuewen] handle_image: 尝试从 message['Content'] (长度: {len(content_value)}) 直接解码Base64。")
+                try:
+                    base64_str_to_decode = content_value
+                    if "base64," in content_value: # 处理 "data:image/...;base64," 前缀
+                        base64_str_to_decode = content_value.split("base64,", 1)[1]
+                    
+                    decoded_bytes = base64.b64decode(base64_str_to_decode)
+                    if len(decoded_bytes) > 1000: # Doubao使用1000字节作为有效数据阈值
+                        image_data = decoded_bytes
+                        logger.info(f"[Yuewen] handle_image: 成功从 message['Content'] 直接解码Base64图片数据，大小: {len(image_data)} 字节.")
+                    else:
+                        logger.warning(f"[Yuewen] handle_image: 从 message['Content'] 解码Base64后数据过小 (大小: {len(decoded_bytes)}B)，视为无效。")
+                
+                except base64.binascii.Error as b64_error: # 捕获Base64解码错误
+                    logger.debug(f"[Yuewen] handle_image: message['Content'] Base64解码失败: {b64_error}. 内容不是有效的Base64。")
+                except Exception as e_direct_extract: # 捕获其他直接提取错误
+                    logger.warning(f"[Yuewen] handle_image: 直接从 message['Content'] 提取图片时发生通用错误: {e_direct_extract}")
+
+            # 步骤2: 如果直接提取失败，则调用 self.download_image 作为备用
+            if not image_data:
+                logger.info(f"[Yuewen] handle_image: 未能从 message['Content'] 直接提取图片，将调用 self.download_image。")
+                image_data = await self.download_image(bot, message)
             
             if not image_data:
                 await bot.send_text_message(from_wxid, "❌ 无法获取图片数据，请重试")
@@ -3660,7 +3686,7 @@ class YuewenPlugin(PluginBase):
                 
                 # 发送消息
                 await bot.send_text_message(from_wxid, "🔄 正在处理图片，请稍候...")
-                result = await self._send_message_new_async(prompt, attachments)
+                result = await self.send_message_async(prompt, attachments=attachments)
                 
                 # 清除识图请求
                 self.waiting_for_image.pop(user_id, None)
@@ -3749,7 +3775,7 @@ class YuewenPlugin(PluginBase):
                 
                 # 发送消息
                 await bot.send_text_message(from_wxid, "🔄 正在处理图片，请稍候...")
-                result = await self._send_message_old_async(prompt, attachments)
+                result = await self.send_message_async(prompt, attachments=attachments)
                 
                 # 清除识图请求
                 self.waiting_for_image.pop(user_id, None)
@@ -3767,8 +3793,35 @@ class YuewenPlugin(PluginBase):
             logger.info(f"[Yuewen] 用户 {user_id} 正在等待多图上传，处理图片消息")
             multi_data = self.multi_image_data[user_id]
             try:
-                # 下载图片
-                image_data = await self.download_image(bot, message)
+                # 新的图片获取逻辑开始
+                image_data = None # 初始化 image_data
+
+                # 步骤1: 尝试直接从 message['Content'] 提取Base64数据 (类似Doubao)
+                content_value = message.get('Content')
+                if isinstance(content_value, str) and len(content_value) > 200: 
+                    logger.debug(f"[Yuewen] handle_image (multi_image): 尝试从 message['Content'] (长度: {len(content_value)}) 直接解码Base64。")
+                    try:
+                        base64_str_to_decode = content_value
+                        if "base64," in content_value: 
+                            base64_str_to_decode = content_value.split("base64,", 1)[1]
+                        
+                        decoded_bytes = base64.b64decode(base64_str_to_decode)
+                        if len(decoded_bytes) > 1000: 
+                            image_data = decoded_bytes
+                            logger.info(f"[Yuewen] handle_image (multi_image): 成功从 message['Content'] 直接解码Base64图片数据，大小: {len(image_data)} 字节.")
+                        else:
+                            logger.warning(f"[Yuewen] handle_image (multi_image): 从 message['Content'] 解码Base64后数据过小 (大小: {len(decoded_bytes)}B)，视为无效。")
+                    
+                    except base64.binascii.Error as b64_error: 
+                        logger.debug(f"[Yuewen] handle_image (multi_image): message['Content'] Base64解码失败: {b64_error}.")
+                    except Exception as e_direct_extract: 
+                        logger.warning(f"[Yuewen] handle_image (multi_image): 直接从 message['Content'] 提取图片时发生通用错误: {e_direct_extract}")
+
+                # 步骤2: 如果直接提取失败，则调用 self.download_image 作为备用
+                if not image_data:
+                    logger.info(f"[Yuewen] handle_image (multi_image): 未能从 message['Content'] 直接提取图片，将调用 self.download_image。")
+                    image_data = await self.download_image(bot, message)
+                # 新的图片获取逻辑结束
                 
                 if not image_data:
                     await bot.send_text_message(from_wxid, "❌ 无法获取图片数据，请重试")
